@@ -1,0 +1,213 @@
+import time
+from sklearn.svm import SVC
+from sklearn.model_selection import StratifiedShuffleSplit, GridSearchCV
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import accuracy_score,precision_score,matthews_corrcoef,recall_score,roc_auc_score
+
+import numpy as np
+import pandas as pd
+
+from sklearn.model_selection import cross_val_score,LeaveOneOut
+import matplotlib.pyplot as plt
+import itertools
+
+def all_k_tuple(k=3):
+    all_kmer = []
+    for i in itertools.product('ATGC', repeat=k):
+        all_kmer.append(''.join(i))
+    return all_kmer
+
+def kmer2(all_kmer, seq, k=3):
+    L = len(seq)
+    count = L - k + 1
+    seq_kmer = [seq[i:i + k] for i in range(0, count)]  # split DNA_seq into kmer from left to right
+    all_kmer_dict = dict.fromkeys(all_kmer, 0)
+    # count kmer times
+    for key in seq_kmer:
+        all_kmer_dict[key] = all_kmer_dict.get(key) + 1
+    values = [all_kmer_dict[x] / count for x in all_kmer]
+    return values
+
+def seqs2kmer_matrix(seqs_df, k=3):
+    seqs_df2 = seqs_df.copy()
+    all_kmer = all_k_tuple(k)
+    samples = []
+
+    for i in range(0, seqs_df2.shape[0]):
+        seq_id, seq = seqs_df2.iloc[i]
+        values = kmer2(all_kmer, seq, k)
+        samples.append(values)
+
+    return pd.DataFrame(samples)
+
+'''
+1.重复的长度：短重复的信息量没长重复大，比如极端情况，以一为单位长度，重复无意义
+2.重复的次数
+'''
+def repeat_index(seq,len_unit):
+    len_seq = len(seq)
+    count = len_seq-len_unit+1
+    saw = set([seq[i:i+len_unit] for i in range(0,count)])
+    repeat_sum = np.sum([seq.count(key)-1 for key in saw])
+    return repeat_sum
+
+def repeat_range(seq_matrix,min_len,max_len):
+    '''
+    take repeat length range of (min_len,max_len) into consideration
+    :param seq_matrix: DataFrame of 2 dimension (seq_id,seqs)
+    :param min_len: the min length of repeat sequence into consideration
+    :param max_len: the max length of repeat sequence into consideration(less than the fix length of seqs)
+    :return: DataFrame of pseKnc part
+    '''
+    if max_len >= max(seq_matrix["seq"].str.len()):
+        max_len = max(seq_matrix["seq"].str.len())-1
+    seqs = seq_matrix["seq"]
+    result = [[repeat_index(seq,i) for i in range(min_len,max_len+1)] for seq in seqs]
+    # result = pd.DataFrame(result,index=seq_matrix["seq_id"])
+    result = pd.DataFrame(result)
+    return result
+
+def repeat_matrix(seq_matrix,min_len,max_len,k=2):
+    kmer_no_yes = seqs2kmer_matrix(seq_matrix, k)
+    repeat_no_yes = repeat_range(seq_matrix, min_len, max_len)
+    data_no_yes = pd.concat([kmer_no_yes, repeat_no_yes],axis=1)
+    return data_no_yes
+
+from collections import Counter
+import numpy as np
+import pandas as pd
+import pickle as p
+
+
+def remove_number(ss):
+    ss1 = ss
+    for i in range(10):
+        ss1 = ss1.replace(str(i), '')
+    return ss1
+
+def read_seq_data(file_path):
+    '''
+    Arguments:
+    file_path -- 数据文件路径，格式参考（"../data/test.txt"）
+
+    Return:
+    seq_data -- 数据框格式，（序列名，序列）
+    '''
+    m = {}
+    with open(file_path, "r") as f:
+        lines = ""
+        for line in f.readlines():
+            line = line.upper().strip()  # 去掉列表中每一个元素的换行符
+            if line.startswith(">"):
+                if lines != "":
+                    m[key] = lines
+                    lines = ""
+                key = line[1:]
+            else:
+                line = remove_number(line)
+                lines += line
+    m[key] = lines
+    keys = [x for x in m.keys()]
+    values = [m[x] for x in keys]
+    seq_data = pd.DataFrame({"seq_id": keys, "seq": values})
+    return seq_data
+
+
+def load_data():
+    weak = read_seq_data("D:/data/enhancer/weak.txt")
+    strong = read_seq_data("D:/data/enhancer/strong.txt")
+    no = read_seq_data("D:/data/enhancer/non_enhancers.txt")
+#     physical_standard = pd.read_table('/Users/lifei/Documents/pythonProject/data/physical_standard.txt', sep="\t", header=0,
+#                                       index_col=0)  # 制表符分隔，空格的会（16，1）
+#     physical_standard = pd.DataFrame(physical_standard.astype(np.float32))
+    seqs = pd.concat([strong, weak,no], axis=0)
+    label = [1]*742
+    label.extend([2]*742)
+    label.extend([0]*1484)
+#     return seqs,label,physical_standard
+    return seqs,label
+
+def load_independent():
+    '''
+    原数据有重复的名称，用Counter找出来
+    '''
+    independent = read_seq_data("D:/data/enhancer/independent.txt")
+    label = [1] * 100
+    label.extend([2] * 100)
+    label.extend([0] * 200)
+    return independent,label
+
+def score(y_real,y_pred):
+    print("ACC:", accuracy_score(y_real, y_pred))
+    print("MCC:", matthews_corrcoef(y_real, y_pred))
+    print("Sn:", recall_score(y_real, y_pred))
+    print("Sp:", precision_score(y_real, y_pred))
+    # print("AUC:", roc_auc_score(y_real, y_pred))
+
+if __name__ == "__main__":
+    # ------------------------------------seq--------------------------------------------------
+    seqs, label = load_data()  # 742strong 742weak 1484no
+    independent_seqs, independent_label = load_independent()  # 100strong 100weak 200no
+    # ------------------------------repeat matrix build----------------------------------------
+    data_3 = repeat_matrix(seqs, 2, 200, 3)
+    data_strong_weak_3 = data_3.iloc[:1484, ]
+    data_in_3 = repeat_matrix(independent_seqs, 2, 200, 3)
+    data_in_strong_weak_3 = data_in_3.iloc[:200, ]
+
+    data_4 = repeat_matrix(seqs, 2, 200, 4)
+    data_strong_weak_4 = data_4.iloc[:1484, ]
+    data_in_4 = repeat_matrix(independent_seqs, 2, 200, 4)
+    data_in_strong_weak_4 = data_in_4.iloc[:200, ]
+    # -------------------------------label build-----------------------------------------------
+    label_no_yes = label.copy()
+    label_no_yes = np.array(label_no_yes)
+    label_no_yes[label_no_yes == 2] = 1
+    print("label_no_yes", Counter(label_no_yes))
+    label_strong_weak = label[:1484]
+    label_strong_weak = np.array(label_strong_weak)
+    label_strong_weak[label_strong_weak == 2] = 0
+    print("label_strong_weak", Counter(label_strong_weak))
+
+    independent_label_no_yes = independent_label.copy()
+    independent_label_no_yes = np.array(independent_label_no_yes)
+    independent_label_no_yes[independent_label_no_yes == 2] = 1
+    print("independent_label_no_yes", Counter(independent_label_no_yes))
+    independent_label_strong_weak = independent_label[:200]
+    independent_label_strong_weak = np.array(independent_label_strong_weak)
+    independent_label_strong_weak[independent_label_strong_weak == 2] = 0
+    print("independent_label_strong_weak", Counter(independent_label_strong_weak))
+    data = {
+        "data_no_yes": data_4,
+        "label_no_yes": label_no_yes,
+        "data_strong_weak": data_strong_weak_4,
+        "label_strong_weak": label_strong_weak,
+        "data_independent_no_yes": data_in_4,
+        "label_independent_no_yes": independent_label_no_yes,
+        "data_independent_strong_weak": data_in_strong_weak_4,
+        "label_independent_strong_weak": independent_label_strong_weak
+    }
+
+    f = open("D:/data/enhancer/data.pkl", 'wb')  # 二进制打开，如果找不到该文件，则创建一个
+    p.dump(data, f)  # 写入文件
+    f.close()  # 关闭文件
+#----------------------------------------------------------测试----------------------------------------------------
+import pickle as p
+f = open("D:/data/enhancer/data.pkl", 'rb')
+dataset = p.load(f)  # 重新加载数据到列表中
+data_no_yes = dataset["data_no_yes"]
+label_no_yes = dataset["label_no_yes"]
+data_strong_weak = dataset["data_strong_weak"]
+label_strong_weak = dataset["label_strong_weak"]
+data_independent_no_yes = dataset["data_independent_no_yes"]
+label_independent_no_yes = dataset["label_independent_no_yes"]
+data_independent_strong_weak = dataset["data_independent_strong_weak"]
+label_independent_strong_weak = dataset["label_independent_strong_weak"]
+
+rfc = RandomForestClassifier(n_estimators=179
+                                ,max_depth=18
+                                ,random_state=90)
+rfc.fit(data_strong_weak, label_strong_weak)
+y_pred_strong_weak = rfc.predict(data_independent_strong_weak)
+score(label_independent_strong_weak, y_pred_strong_weak)
